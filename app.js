@@ -35,7 +35,8 @@ async function resolveHostname(hostname) {
     }
 }
 
-async function testConnection(host, version) {
+async function testConnection(hostInput, version) {
+    let host = hostInput;
     const connectionConfig = {
         ...dbConfig,
         host: host
