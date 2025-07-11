@@ -38,10 +38,24 @@ async function resolveHostname(hostname) {
 async function testConnection(host, version) {
     const connectionConfig = {
         ...dbConfig,
-        host: version === 'IPv6' ? `[${host}]` : host
+        host: host
     };
 
     try {
+        
+        // Special handling for IPv6
+        if (version === 'IPv6') {
+            // Remove the brackets if they exist
+            host = host.replace(/[\[\]]/g, '');
+            connectionConfig = {
+                ...dbConfig,
+                host: host,
+                connectTimeout: 10000,  // Add timeout
+                // Add IPv6 specific configurations
+                ipv6: true,  // Force IPv6
+            };
+        }
+             
         console.log(`Attempting ${version} connection to: ${host}`);
         const connection = await mysql.createConnection(connectionConfig);
         
