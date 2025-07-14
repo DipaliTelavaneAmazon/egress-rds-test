@@ -1,6 +1,7 @@
 const express = require('express');
 const mysql = require('mysql2/promise');
 const dns = require('dns').promises;
+const net = require('net');
 
 const app = express();
 
@@ -15,15 +16,46 @@ const dbConfig = {
 // Get the RDS cluster endpoint from environment variable
 const rdsEndpoint = process.env.RDS_ENDPOINT;
 
+async function testNetworkConnectivity(host, port) {
+    return new Promise((resolve, reject) => {
+        const socket = new net.Socket();
+        
+        socket.setTimeout(5000);  // 5 second timeout
+        
+        socket.on('connect', () => {
+            socket.end();
+            resolve(true);
+        });
+        
+        socket.on('timeout', () => {
+            socket.destroy();
+            reject(new Error('Connection timed out'));
+        });
+        
+        socket.on('error', (err) => {
+            reject(err);
+        });
+        
+        socket.connect(port, host);
+    });
+}
+
 async function resolveHostname(hostname) {
     try {
-        // Resolve IPv4 addresses
-        const ipv4Addresses = await dns.resolve4(hostname);
-        console.log('IPv4 addresses:', ipv4Addresses);
+        const [ipv4Addresses, ipv6Addresses] = await Promise.all([
+            dns.resolve4(hostname),
+            dns.resolve6(hostname)
+        ]);
 
-        // Resolve IPv6 addresses
-        const ipv6Addresses = await dns.resolve6(hostname);
-        console.log('IPv6 addresses:', ipv6Addresses);
+        console.log('DNS Resolution Results:', {
+            hostname,
+            ipv4Addresses,
+            ipv6Addresses
+        });
+
+        if (!ipv4Addresses.length && !ipv6Addresses.length) {
+            throw new Error('No IP addresses resolved');
+        }
 
         return {
             ipv4: ipv4Addresses[0],
@@ -39,25 +71,19 @@ async function testConnection(hostInput, version) {
     let host = hostInput;
     let connectionConfig = {
         ...dbConfig,
-        host: host
+        host: version === 'IPv6' ? `[${host}]` : host,
+        connectTimeout: 10000,
+        ipv6: version === 'IPv6',
+        debug: true // Enable debug logging
     };
 
     try {
-        
-        // Special handling for IPv6
-        if (version === 'IPv6') {
-            // Remove the brackets if they exist
-            host = host.replace(/[\[\]]/g, '');
-            connectionConfig = {
-                ...dbConfig,
-                host: host,
-                connectTimeout: 10000,  // Add timeout
-                // Add IPv6 specific configurations
-                ipv6: true,  // Force IPv6
-            };
-        }
-             
-        console.log(`Attempting ${version} connection to: ${host}`);
+        console.log(`Attempting ${version} connection with config:`, connectionConfig);
+
+        // Test network connectivity first
+        await testNetworkConnectivity(host, dbConfig.port);
+        console.log(`Network connectivity test successful for ${version}`);
+
         const connection = await mysql.createConnection(connectionConfig);
         
         // Test query
@@ -77,10 +103,22 @@ async function testConnection(hostInput, version) {
             }
         };
     } catch (error) {
-        console.error(`${version} connection failed:`, error);
+        console.error(`${version} connection failed:`, {
+            error: error,
+            errorCode: error.code,
+            errorMessage: error.message,
+            host: host,
+            config: connectionConfig
+        });
         return {
             success: false,
-            error: error.message
+            error: error.message,
+            errorDetails: {
+                code: error.code,
+                syscall: error.syscall,
+                address: error.address,
+                port: error.port
+            }
         };
     }
 }
