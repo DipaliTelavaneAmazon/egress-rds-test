@@ -1,61 +1,118 @@
 const express = require('express');
-const mysql = require('mysql2/promise');
+const mysql = require('mysql2');
 const dns = require('dns').promises;
-const net = require('net');
 
 const app = express();
 
-// Configuration from environment variables
+// Configuration
 const dbConfig = {
-    user: process.env.DB_USER,
+    user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD,
     database: 'V2NCanaryDB',
-    port: 3306
+    port: 3306,
+    connectionLimit: 10
 };
 
-// Get the RDS cluster endpoint from environment variable
 const rdsEndpoint = process.env.RDS_ENDPOINT;
 
-async function testNetworkConnectivity(host, port) {
+// Create separate pools for IPv4 and IPv6
+let ipv4Pool = null;
+let ipv6Pool = null;
+
+function createPool(host, version) {
+    const config = {
+        ...dbConfig,
+        host: host
+    };
+
+    if (version === 'IPv6') {
+        host = host.replace(/[\[\]]/g, '');
+        config.host = host;
+        config.family = 6;
+    }
+
+    return mysql.createPool(config);
+}
+
+async function testConnection(pool, version) {
     return new Promise((resolve, reject) => {
-        const socket = new net.Socket();
-        
-        socket.setTimeout(5000);  // 5 second timeout
-        
-        socket.on('connect', () => {
-            socket.end();
-            resolve(true);
+        pool.getConnection((err, connection) => {
+            if (err) {
+                console.error(`${version} connection error:`, err);
+                return resolve({
+                    success: false,
+                    error: err.message,
+                    details: {
+                        code: err.code,
+                        errno: err.errno
+                    }
+                });
+            }
+
+            connection.query('SELECT 1 as test', (error, results) => {
+                if (error) {
+                    connection.release();
+                    return resolve({
+                        success: false,
+                        error: error.message
+                    });
+                }
+
+                connection.query('SELECT @@hostname, @@port, DATABASE()', (error, connectionInfo) => {
+                    connection.release();
+                    if (error) {
+                        return resolve({
+                            success: false,
+                            error: error.message
+                        });
+                    }
+
+                    resolve({
+                        success: true,
+                        data: {
+                            test: results,
+                            connectionInfo
+                        }
+                    });
+                });
+            });
         });
-        
-        socket.on('timeout', () => {
-            socket.destroy();
-            reject(new Error('Connection timed out'));
-        });
-        
-        socket.on('error', (err) => {
-            reject(err);
-        });
-        
-        socket.connect(port, host);
     });
+}
+
+// Initialize pools
+async function initializePools() {
+    try {
+        const addresses = await resolveHostname(rdsEndpoint);
+        
+        // Initialize IPv4 pool
+        ipv4Pool = createPool(addresses.ipv4, 'IPv4');
+        ipv4Pool.on('error', err => {
+            console.error('Unexpected error on IPv4 pool', err);
+        });
+
+        // Initialize IPv6 pool
+        ipv6Pool = createPool(addresses.ipv6, 'IPv6');
+        ipv6Pool.on('error', err => {
+            console.error('Unexpected error on IPv6 pool', err);
+        });
+
+        console.log('Connection pools initialized successfully');
+    } catch (error) {
+        console.error('Failed to initialize pools:', error);
+        throw error;
+    }
 }
 
 async function resolveHostname(hostname) {
     try {
-        const [ipv4Addresses, ipv6Addresses] = await Promise.all([
-            dns.resolve4(hostname),
-            dns.resolve6(hostname)
-        ]);
+        console.log('Resolving hostname:', hostname);
+        
+        const ipv4Addresses = await dns.resolve4(hostname);
+        console.log('IPv4 addresses:', ipv4Addresses);
 
-        console.log('DNS Resolution Results:', {
-            hostname,
-            ipv4Addresses,
-            ipv6Addresses
-        });
-
-        if (!ipv4Addresses.length && !ipv6Addresses.length) {
-            throw new Error('No IP addresses resolved');
-        }
+        const ipv6Addresses = await dns.resolve6(hostname);
+        console.log('IPv6 addresses:', ipv6Addresses);
 
         return {
             ipv4: ipv4Addresses[0],
@@ -64,62 +121,6 @@ async function resolveHostname(hostname) {
     } catch (error) {
         console.error('DNS resolution error:', error);
         throw error;
-    }
-}
-
-async function testConnection(hostInput, version) {
-    let host = hostInput;
-    let connectionConfig = {
-        ...dbConfig,
-        host: version === 'IPv6' ? `[${host}]` : host,
-        connectTimeout: 10000,
-        ipv6: version === 'IPv6',
-        debug: true // Enable debug logging
-    };
-
-    try {
-        console.log(`Attempting ${version} connection with config:`, connectionConfig);
-
-        // Test network connectivity first
-        await testNetworkConnectivity(host, dbConfig.port);
-        console.log(`Network connectivity test successful for ${version}`);
-
-        const connection = await mysql.createConnection(connectionConfig);
-        
-        // Test query
-        const [rows] = await connection.execute('SELECT 1 as test');
-        console.log(`${version} connection successful:`, rows);
-
-        // Test query to get connection info
-        const [connectionInfo] = await connection.execute('SELECT @@hostname, @@port, DATABASE()');
-        console.log(`${version} connection details:`, connectionInfo);
-
-        await connection.end();
-        return {
-            success: true,
-            data: {
-                test: rows,
-                connectionInfo
-            }
-        };
-    } catch (error) {
-        console.error(`${version} connection failed:`, {
-            error: error,
-            errorCode: error.code,
-            errorMessage: error.message,
-            host: host,
-            config: connectionConfig
-        });
-        return {
-            success: false,
-            error: error.message,
-            errorDetails: {
-                code: error.code,
-                syscall: error.syscall,
-                address: error.address,
-                port: error.port
-            }
-        };
     }
 }
 
@@ -134,11 +135,13 @@ app.get('/health', (req, res) => {
 // IPv4 test endpoint
 app.get('/test-connections/ipv4', async (req, res) => {
     try {
-        const addresses = await resolveHostname(rdsEndpoint);
-        const result = await testConnection(addresses.ipv4, 'IPv4');
+        if (!ipv4Pool) {
+            throw new Error('IPv4 pool not initialized');
+        }
+
+        const result = await testConnection(ipv4Pool, 'IPv4');
         res.json({
             timestamp: new Date().toISOString(),
-            ipv4Address: addresses.ipv4,
             testResult: result
         });
     } catch (error) {
@@ -153,11 +156,13 @@ app.get('/test-connections/ipv4', async (req, res) => {
 // IPv6 test endpoint
 app.get('/test-connections/ipv6', async (req, res) => {
     try {
-        const addresses = await resolveHostname(rdsEndpoint);
-        const result = await testConnection(addresses.ipv6, 'IPv6');
+        if (!ipv6Pool) {
+            throw new Error('IPv6 pool not initialized');
+        }
+
+        const result = await testConnection(ipv6Pool, 'IPv6');
         res.json({
             timestamp: new Date().toISOString(),
-            ipv6Address: addresses.ipv6,
             testResult: result
         });
     } catch (error) {
@@ -172,20 +177,17 @@ app.get('/test-connections/ipv6', async (req, res) => {
 // Dualstack test endpoint
 app.get('/test-connections/dualstack', async (req, res) => {
     try {
-        const addresses = await resolveHostname(rdsEndpoint);
-        
-        // Run both IPv4 and IPv6 tests in parallel
+        if (!ipv4Pool || !ipv6Pool) {
+            throw new Error('Connection pools not initialized');
+        }
+
         const [ipv4Result, ipv6Result] = await Promise.all([
-            testConnection(addresses.ipv4, 'IPv4'),
-            testConnection(addresses.ipv6, 'IPv6')
+            testConnection(ipv4Pool, 'IPv4'),
+            testConnection(ipv6Pool, 'IPv6')
         ]);
 
         res.json({
             timestamp: new Date().toISOString(),
-            addresses: {
-                ipv4: addresses.ipv4,
-                ipv6: addresses.ipv6
-            },
             testResults: {
                 ipv4: ipv4Result,
                 ipv6: ipv6Result
@@ -200,18 +202,29 @@ app.get('/test-connections/dualstack', async (req, res) => {
     }
 });
 
-// Error handling
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
+// Initialize the application
+async function initialize() {
+    try {
+        await initializePools();
+        const port = process.env.PORT || 3000;
+        app.listen(port, () => {
+            console.log(`Server running on port ${port}`);
+            console.log('Environment:', {
+                RDS_ENDPOINT: rdsEndpoint,
+                PORT: port
+            });
+        });
+    } catch (error) {
+        console.error('Failed to initialize application:', error);
+        process.exit(1);
+    }
+}
 
-// Start server
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log('Environment:', {
-        RDS_ENDPOINT: rdsEndpoint,
-        DB_USER: dbConfig.user,
-        PORT: port
-    });
+initialize();
+
+// Cleanup on application shutdown
+process.on('SIGINT', () => {
+    ipv4Pool?.end();
+    ipv6Pool?.end();
+    process.exit();
 });
