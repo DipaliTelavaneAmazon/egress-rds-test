@@ -35,31 +35,43 @@ function createPool(host, version) {
 }
 
 async function testConnection(pool, version) {
-    try {
-        // Test basic connectivity
-        const [testResult] = await pool.query('SELECT 1 as test');
-        
-        // Get connection details
-        const [connectionInfo] = await pool.query('SELECT @@hostname, @@port, DATABASE()');
+    return new Promise((resolve, reject) => {
+        pool.getConnection((err, connection) => {
+            if (err) {
+                console.error(`${version} connection failed:`, err);
+                return resolve({
+                    success: false,
+                    error: err.message,
+                    details: {
+                        code: err.code,
+                        errno: err.errno
+                    }
+                });
+            }
 
-        return {
-            success: true,
-            data: {
-                test: testResult,
-                connectionInfo
-            }
-        };
-    } catch (error) {
-        console.error(`${version} connection failed:`, error);
-        return {
-            success: false,
-            error: error.message,
-            details: {
-                code: error.code,
-                errno: error.errno
-            }
-        };
-    }
+            // Test basic connectivity
+            connection.query('SELECT 1 as test', (error, testResult) => {
+                connection.release();
+                if (error) {
+                    return resolve({
+                        success: false,
+                        error: error.message,
+                        details: {
+                            code: error.code,
+                            errno: error.errno
+                        }
+                    });
+                }
+
+                resolve({
+                    success: true,
+                    data: {
+                        test: testResult
+                    }
+                });
+            });
+        });
+    });
 }
 
 // Initialize pools
@@ -116,7 +128,7 @@ app.get('/test/ipv4', async (req, res) => {
             timestamp: new Date().toISOString(), 
             testResult: result 
         });
-        
+
     } catch (error) {
         res.status(500).json({ 
             message: "Test Failed",
