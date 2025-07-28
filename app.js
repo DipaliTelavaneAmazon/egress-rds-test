@@ -7,7 +7,7 @@ const app = express();
 // Configuration
 const dbConfig = {
     user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD,
+    password: process.env.DB_PASSWORD || 'iluvVtoN',
     database: 'V2NCanaryDB',
     port: 3306,
     connectionLimit: 10
