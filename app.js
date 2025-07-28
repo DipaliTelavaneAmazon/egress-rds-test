@@ -115,75 +115,73 @@ app.get('/health', (req, res) => {
     res.json({ status: 'healthy', timestamp: new Date().toISOString() });
 });
 
-// IPv4 test endpoint
-app.get('/test/ipv4', async (req, res) => {
+// Test endpoint based on TEST_MODE environment variable
+app.get('/', async (req, res) => {
     try {
-        if (!ipv4Pool) {
-            throw new Error('IPv4 pool not initialized');
-        }
-
-        const result = await testConnection(ipv4Pool, 'IPv4');
-        res.json({ 
-            message: result.success ? "Test Successful" : "Test Failed",
-            timestamp: new Date().toISOString(), 
-            testResult: result 
-        });
-
-    } catch (error) {
-        res.status(500).json({ 
-            message: "Test Failed",
-            timestamp: new Date().toISOString(), 
-            error: error.message 
-        });
-    }
-});
-
-// IPv6 test endpoint
-app.get('/test/ipv6', async (req, res) => {
-    try {
-        if (!ipv6Pool) {
-            throw new Error('IPv6 pool not initialized');
-        }
-
-        const result = await testConnection(ipv6Pool, 'IPv6');
-        res.json({ 
-            message: result.success ? "Test Successful" : "Test Failed",
-            timestamp: new Date().toISOString(), 
-            testResult: result 
-        });
+        const testMode = process.env.TEST_MODE || 'ipv4'; // Default to IPv4 if not specified
         
-    } catch (error) {
-        res.status(500).json({ 
-            message: "Test Failed",
-            timestamp: new Date().toISOString(), 
-            error: error.message 
-        });
-    }
-});
-
-// Dualstack test endpoint
-app.get('/test/dualstack', async (req, res) => {
-    try {
-        if (!ipv4Pool || !ipv6Pool) {
-            throw new Error('Connection pools not initialized');
+        switch (testMode.toLowerCase()) {
+            case 'ipv4':
+                if (!ipv4Pool) {
+                    throw new Error('IPv4 pool not initialized');
+                }
+                
+                const ipv4Result = await testConnection(ipv4Pool, 'IPv4');
+                res.json({ 
+                    testMode: 'IPv4',
+                    message: ipv4Result.success ? "Test Successful" : "Test Failed",
+                    timestamp: new Date().toISOString(), 
+                    testResult: ipv4Result 
+                });
+                break;
+                
+            case 'ipv6':
+                if (!ipv6Pool) {
+                    throw new Error('IPv6 pool not initialized');
+                }
+                
+                const ipv6Result = await testConnection(ipv6Pool, 'IPv6');
+                res.json({ 
+                    testMode: 'IPv6',
+                    message: ipv6Result.success ? "Test Successful" : "Test Failed",
+                    timestamp: new Date().toISOString(), 
+                    testResult: ipv6Result 
+                });
+                break;
+                
+            case 'dualstack':
+                if (!ipv4Pool || !ipv6Pool) {
+                    throw new Error('Connection pools not initialized');
+                }
+                
+                const [dualIpv4Result, dualIpv6Result] = await Promise.all([
+                    testConnection(ipv4Pool, 'IPv4'),
+                    testConnection(ipv6Pool, 'IPv6')
+                ]);
+                
+                res.json({
+                    testMode: 'Dualstack',
+                    message: (dualIpv4Result.success && dualIpv6Result.success) ? "Test Successful" : "Test Failed",
+                    timestamp: new Date().toISOString(),
+                    testResults: { ipv4: dualIpv4Result, ipv6: dualIpv6Result }
+                });
+                break;
+                
+            default:
+                res.status(400).json({
+                    message: "Invalid TEST_MODE. Use 'ipv4', 'ipv6', or 'dualstack'",
+                    timestamp: new Date().toISOString(),
+                    currentTestMode: testMode
+                });
+                return;
         }
 
-        const [ipv4Result, ipv6Result] = await Promise.all([
-            testConnection(ipv4Pool, 'IPv4'),
-            testConnection(ipv6Pool, 'IPv6')
-        ]);
-
-        res.json({
-            message: (ipv4Result.success && ipv6Result.success) ? "Test Successful" : "Test Failed",
-            timestamp: new Date().toISOString(),
-            testResults: { ipv4: ipv4Result, ipv6: ipv6Result }
-        });
-
     } catch (error) {
         res.status(500).json({ 
             message: "Test Failed",
             timestamp: new Date().toISOString(), 
-            error: error.message 
+            error: error.message,
+            testMode: process.env.TEST_MODE || 'ipv4'
         });
     }
 });
